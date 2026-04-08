@@ -220,12 +220,13 @@ canvas{max-height:280px}
       </div>
       <div id="statusBadge"></div>
     </div>
-    <div class="hero-kpis">
-      <div class="hkpi"><div class="hkpi-label">Portfolio Value</div><div class="hkpi-val gold" id="hkpi-value">₹0</div><div class="hkpi-sub">Current market value</div></div>
-      <div class="hkpi"><div class="hkpi-label">Total Invested</div><div class="hkpi-val" id="hkpi-invested">₹0</div><div class="hkpi-sub">Avg cost × qty</div></div>
+    <div class="hero-kpis" style="grid-template-columns:repeat(7,1fr)">
+      <div class="hkpi"><div class="hkpi-label">Total Portfolio</div><div class="hkpi-val gold" id="hkpi-value">₹0</div><div class="hkpi-sub">Equity + MF</div></div>
+      <div class="hkpi"><div class="hkpi-label">Equity Value</div><div class="hkpi-val" id="hkpi-eq-value">₹0</div><div class="hkpi-sub" id="hkpi-eq-sub">Incl. pledged</div></div>
+      <div class="hkpi"><div class="hkpi-label">MF Value</div><div class="hkpi-val" id="hkpi-mf-value">₹0</div><div class="hkpi-sub" id="hkpi-mf-sub">Mutual funds</div></div>
       <div class="hkpi"><div class="hkpi-label">Total P&amp;L</div><div class="hkpi-val" id="hkpi-pnl">₹0</div><div class="hkpi-sub" id="hkpi-pnl-pct">0%</div></div>
       <div class="hkpi"><div class="hkpi-label">Today's Change</div><div class="hkpi-val" id="hkpi-day">₹0</div><div class="hkpi-sub" id="hkpi-day-pct">0%</div></div>
-      <div class="hkpi"><div class="hkpi-label">Holdings</div><div class="hkpi-val" id="hkpi-count">0</div><div class="hkpi-sub">Stocks in DEMAT</div></div>
+      <div class="hkpi"><div class="hkpi-label">Stocks / Pledged</div><div class="hkpi-val" id="hkpi-count">0</div><div class="hkpi-sub" id="hkpi-pledged-sub">0 pledged</div></div>
       <div class="hkpi"><div class="hkpi-label">Winners / Losers</div><div class="hkpi-val" id="hkpi-wl">—</div><div class="hkpi-sub">Profit / Loss stocks</div></div>
     </div>
   </div>
@@ -448,19 +449,30 @@ canvas{max-height:280px}
 // ══════════════════════════════════════════════════════════════════════════════
 // UTILITIES
 // ══════════════════════════════════════════════════════════════════════════════
-function fmt(n){return '₹'+Math.abs(n).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}
-function fmtCr(n){const a=Math.abs(n);return a>=10000000?'₹'+(a/10000000).toFixed(2)+'Cr':a>=100000?'₹'+(a/100000).toFixed(2)+'L':fmt(n);}
-function fmtS(n){return (n<0?'−':'')+fmtCr(n);}
-function fmtPct(n){return (n>=0?'+':'')+n.toFixed(2)+'%';}
+function fmt(n){const v=isNaN(n)?0:Math.abs(n);return '₹'+v.toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}
+function fmtCr(n){const v=isNaN(parseFloat(n))?0:parseFloat(n);const a=Math.abs(v);return a>=10000000?'₹'+(a/10000000).toFixed(2)+'Cr':a>=100000?'₹'+(a/100000).toFixed(2)+'L':fmt(v);}
+function fmtS(n){const v=isNaN(parseFloat(n))?0:parseFloat(n);return (v<0?'−':'')+fmtCr(v);}
+function fmtPct(n){const v=isNaN(parseFloat(n))?0:parseFloat(n);return (v>=0?'+':'')+v.toFixed(2)+'%';}
 function escH(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function toast(msg,dur=2600){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),dur);}
 function startLoad(){const b=document.getElementById('lbar');b.className='lbar on';}
 function doneLoad(){const b=document.getElementById('lbar');b.className='lbar done';setTimeout(()=>b.className='lbar',400);}
 async function api(url,opts={}){
   startLoad();
-  const r=await fetch(url,{headers:{'Content-Type':'application/json'},...opts});
+  const r=await fetch(url,{credentials:'same-origin',headers:{'Content-Type':'application/json'},...opts});
   doneLoad();
-  if(!r.ok){const e=await r.json().catch(()=>({error:'Error'}));toast('❌ '+e.error);throw new Error(e.error);}
+  if(!r.ok){
+    const txt=await r.text();
+    if(txt.trimStart().startsWith('<')){
+      toast('❌ Session expired — please log in again');
+      setTimeout(()=>window.location='/login',1500);
+      throw new Error('Session expired');
+    }
+    let e={error:'Server error '+r.status};
+    try{e=JSON.parse(txt);}catch(_){}
+    toast('❌ '+(e.error||'Error '+r.status));
+    throw new Error(e.error||'Error');
+  }
   return r.json();
 }
 
@@ -491,14 +503,18 @@ function switchTab(name, btn){
 // INIT — load last snapshot
 // ══════════════════════════════════════════════════════════════════════════════
 async function init(){
-  // Check URL params
   const params = new URLSearchParams(window.location.search);
   if(params.get('connected')==='1') toast('✅ Kite connected! Now click Sync Holdings.');
   if(params.get('error')) toast('❌ Kite auth error: '+params.get('error'));
   window.history.replaceState({}, '', '/investments');
 
   await loadConfig();
-  await loadHoldings();
+  try {
+    await loadHoldings();
+  } catch(e) {
+    console.error('init loadHoldings error:', e);
+    // Don't block page load — just show empty state
+  }
 }
 
 async function loadConfig(){
@@ -518,17 +534,23 @@ async function loadConfig(){
 }
 
 async function loadHoldings(){
+  // No try/catch here — let errors propagate to the caller (syncHoldings or init)
   const data = await api('/api/kite/holdings');
-  if(!data.holdings || data.holdings.length===0){
-    renderNoData();
-    return;
-  }
-  holdings   = data.holdings;
+  holdings   = data.holdings || [];
   mfHoldings = data.mf || [];
+
   updateHeroKPIs(data);
-  document.getElementById('syncInfo').textContent =
-    data.fetched_at ? `Last synced: ${data.fetched_at.slice(0,16).replace('T',' ')}` : '';
-  renderHoldingsTable();
+
+  const si = document.getElementById('syncInfo');
+  if (si) si.textContent = data.fetched_at
+    ? `Last synced: ${data.fetched_at.slice(0,16).replace('T',' ')}`
+    : '';
+
+  if (holdings.length) {
+    renderHoldingsTable();
+  } else {
+    renderNoData();
+  }
 }
 
 function renderNoData(){
@@ -542,37 +564,65 @@ function renderNoData(){
 // ══════════════════════════════════════════════════════════════════════════════
 // HERO KPIs
 // ══════════════════════════════════════════════════════════════════════════════
+function setEl(id, val, prop='textContent') {
+  const el = document.getElementById(id);
+  if (el) el[prop] = val;
+}
+
+function safeNum(v){ const n=parseFloat(v); return isNaN(n)?0:n; }
+function safeInt(v){ const n=parseInt(v); return isNaN(n)?0:n; }
+
 function updateHeroKPIs(data){
   const h  = data.holdings || [];
   const mf = data.mf || [];
-  let eqValue=0,eqInvested=0,eqPnl=0,dayChangeAmt=0,winners=0,losers=0,pledgedCount=0;
+  let eqValue=0, eqInvested=0, eqPnl=0, dayChangeAmt=0;
+  let winners=0, losers=0, pledgedCount=0;
+
   h.forEach(s=>{
-    const totalQty = parseInt(s.total_quantity||s.quantity||0);
-    const ltp=parseFloat(s.last_price||0),avg=parseFloat(s.average_price||0);
-    const pnl=(ltp-avg)*totalQty, day=parseFloat(s.day_change||0)*totalQty;
-    eqValue+=ltp*totalQty; eqInvested+=avg*totalQty; eqPnl+=pnl; dayChangeAmt+=day;
-    if(pnl>=0)winners++;else losers++;
-    if(parseInt(s.pledged_quantity||0)>0)pledgedCount++;
+    // Use backend-computed fields first, fall back to calculating from raw
+    const totalQty = safeInt(s.total_quantity) || safeInt(s.quantity);
+    const ltp      = safeNum(s.last_price);
+    const avg      = safeNum(s.average_price);
+    const pnl      = safeNum(s.total_pnl) || (ltp - avg) * totalQty;
+    const day      = safeNum(s.day_change) * totalQty;
+    const cv       = safeNum(s.current_value)  || ltp * totalQty;
+    const iv       = safeNum(s.invested_value) || avg * totalQty;
+    eqValue      += cv;
+    eqInvested   += iv;
+    eqPnl        += pnl;
+    dayChangeAmt += day;
+    if (pnl >= 0) winners++; else losers++;
+    if (safeInt(s.pledged_quantity) > 0) pledgedCount++;
   });
-  let mfValue=0,mfInvested=0,mfPnl=0;
-  mf.forEach(m=>{mfValue+=parseFloat(m.current_value||0);mfInvested+=parseFloat(m.invested_value||0);mfPnl+=parseFloat(m.total_pnl||0);});
-  const totalValue=eqValue+mfValue,totalInvested=eqInvested+mfInvested,totalPnl=eqPnl+mfPnl;
-  const pnlPct=totalInvested>0?(totalPnl/totalInvested*100):0;
-  const dayPct=(eqValue-dayChangeAmt)>0?(dayChangeAmt/(eqValue-dayChangeAmt)*100):0;
-  document.getElementById('hkpi-value').textContent    = fmtCr(totalValue);
-  document.getElementById('hkpi-eq-value').textContent = fmtCr(eqValue);
-  document.getElementById('hkpi-eq-sub').textContent   = pledgedCount>0?`${pledgedCount} pledged`:'No pledged';
-  document.getElementById('hkpi-mf-value').textContent = fmtCr(mfValue);
-  document.getElementById('hkpi-mf-sub').textContent   = `${mf.length} fund${mf.length!==1?'s':''}`;
-  const pnlEl=document.getElementById('hkpi-pnl');
-  pnlEl.textContent=fmtS(totalPnl);pnlEl.className='hkpi-val '+(totalPnl>=0?'pos':'neg');
-  document.getElementById('hkpi-pnl-pct').textContent=fmtPct(pnlPct)+' overall';
-  const dayEl=document.getElementById('hkpi-day');
-  dayEl.textContent=fmtS(dayChangeAmt);dayEl.className='hkpi-val '+(dayChangeAmt>=0?'pos':'neg');
-  document.getElementById('hkpi-day-pct').textContent=fmtPct(dayPct)+' today';
-  document.getElementById('hkpi-count').textContent=h.length;
-  document.getElementById('hkpi-pledged-sub').textContent=`${pledgedCount} pledged`;
-  document.getElementById('hkpi-wl').innerHTML=`<span style="color:#6fcf97">${winners}</span> / <span style="color:#eb5757">${losers}</span>`;
+
+  let mfValue=0, mfInvested=0, mfPnl=0;
+  mf.forEach(m=>{
+    mfValue    += safeNum(m.current_value);
+    mfInvested += safeNum(m.invested_value);
+    mfPnl      += safeNum(m.total_pnl);
+  });
+
+  const totalValue    = eqValue    + mfValue;
+  const totalInvested = eqInvested + mfInvested;
+  const totalPnl      = eqPnl      + mfPnl;
+  const pnlPct = totalInvested > 0 ? (totalPnl / totalInvested * 100) : 0;
+  const dayPct = (eqValue - dayChangeAmt) > 0 ? (dayChangeAmt / (eqValue - dayChangeAmt) * 100) : 0;
+
+  setEl('hkpi-value',        fmtCr(totalValue));
+  setEl('hkpi-eq-value',     fmtCr(eqValue));
+  setEl('hkpi-eq-sub',       pledgedCount > 0 ? `${pledgedCount} pledged` : 'No pledged stocks');
+  setEl('hkpi-mf-value',     fmtCr(mfValue));
+  setEl('hkpi-mf-sub',       `${mf.length} fund${mf.length !== 1 ? 's' : ''}`);
+  setEl('hkpi-pnl-pct',      fmtPct(pnlPct) + ' overall');
+  setEl('hkpi-day-pct',      fmtPct(dayPct) + ' today');
+  setEl('hkpi-count',        h.length);
+  setEl('hkpi-pledged-sub',  `${pledgedCount} pledged`);
+  setEl('hkpi-wl', `<span style="color:#6fcf97">${winners}</span> / <span style="color:#eb5757">${losers}</span>`, 'innerHTML');
+
+  const pnlEl = document.getElementById('hkpi-pnl');
+  if (pnlEl) { pnlEl.textContent = fmtS(totalPnl); pnlEl.className = 'hkpi-val '+(totalPnl>=0?'pos':'neg'); }
+  const dayEl = document.getElementById('hkpi-day');
+  if (dayEl) { dayEl.textContent = fmtS(dayChangeAmt); dayEl.className = 'hkpi-val '+(dayChangeAmt>=0?'pos':'neg'); }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -580,15 +630,20 @@ function updateHeroKPIs(data){
 // ══════════════════════════════════════════════════════════════════════════════
 function getComputedHoldings(){
   return holdings.map(s=>{
-    const qty    = parseInt(s.total_quantity||s.quantity||0);
-    const freeQty= parseInt(s.free_quantity||s.quantity||0);
-    const plgdQty= parseInt(s.pledged_quantity||0);
-    const t1Qty  = parseInt(s.t1_quantity||0);
-    const ltp=parseFloat(s.last_price||0),avg=parseFloat(s.average_price||0);
-    const day=parseFloat(s.day_change||0),dayP=parseFloat(s.day_change_percentage||0);
-    const invested=avg*qty,value=ltp*qty,pnl=(ltp-avg)*qty;
-    const pnlPct=invested>0?(pnl/invested*100):0;
-    return {...s,qty,freeQty,plgdQty,t1Qty,ltp,avg,pnl,pnlPct,day,dayP,invested,value};
+    const qty     = safeInt(s.total_quantity) || safeInt(s.quantity);
+    const freeQty = safeInt(s.free_quantity)  || safeInt(s.quantity);
+    const plgdQty = safeInt(s.pledged_quantity);
+    const t1Qty   = safeInt(s.t1_quantity);
+    const ltp     = safeNum(s.last_price);
+    const avg     = safeNum(s.average_price);
+    const day     = safeNum(s.day_change);
+    const dayP    = safeNum(s.day_change_percentage);
+    const invested = avg * qty;
+    const value    = ltp * qty;
+    // Use backend-computed pnl if available (correct for pledged), else derive
+    const pnl      = safeNum(s.total_pnl) || ((ltp - avg) * qty);
+    const pnlPct   = invested > 0 ? (pnl / invested * 100) : 0;
+    return {...s, qty, freeQty, plgdQty, t1Qty, ltp, avg, pnl, pnlPct, day, dayP, invested, value};
   });
 }
 
@@ -623,9 +678,11 @@ function renderHoldingsTable(){
     const dayCls = s.dayP>=0?'chg-pos':'chg-neg';
     const barPct = Math.min(100,Math.abs(s.pnl)/maxPnl*100);
     const barCls = s.pnl>=0?'col-fill-pos':'col-fill-neg';
+    const t1Tag = s.t1Qty>0 ? '<span style="font-size:.7rem;color:#888;margin-left:2px">+'+s.t1Qty+'T1</span>' : '';
+    const plgTag = s.plgdQty>0 ? '<span style="font-size:.7rem;color:#7b2d8b;font-weight:600;margin-left:3px">+'+s.plgdQty+'🔒</span>' : '';
     const qtyDetail = s.plgdQty>0
-      ? `${s.freeQty}<span style="font-size:.7rem;color:#7b2d8b;font-weight:600;margin-left:3px">+${s.plgdQty}🔒</span>${s.t1Qty>0?`<span style="font-size:.7rem;color:#888;margin-left:2px">+${s.t1Qty}T1</span>`:''}`
-      : `${s.qty}${s.t1Qty>0?`<span style="font-size:.7rem;color:#888;margin-left:2px">+${s.t1Qty}T1</span>`:''}`;
+      ? (s.freeQty + plgTag + t1Tag)
+      : (s.qty + t1Tag);
     return `<tr${s.plgdQty>0?' style="background:#fdf8ff"':''}>
       <td><span class="sym-badge">${s.tradingsymbol}</span>${s.plgdQty>0?'<span style="font-size:.65rem;background:#ead6f0;color:#7b2d8b;padding:1px 5px;border-radius:4px;margin-left:4px">🔒 Pledged</span>':''}</td>
       <td><span class="exch-tag">${s.exchange}</span></td>
@@ -893,7 +950,9 @@ async function syncHoldings(){
     await loadHoldings();
   }catch(e){
     doneLoad();
-    showSyncError('Network error — is the Flask server running?');
+    console.error('syncHoldings full error:', e, e?.stack);
+    const msg = e?.message || String(e) || 'Unknown JS error';
+    showSyncError(`JS Error: ${msg} — open browser console (F12) for full stack trace.`);
   }finally{
     btn.disabled=false; btn.textContent='⟳ Sync Holdings';
   }

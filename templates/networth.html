@@ -465,7 +465,7 @@ function startLoad(){document.getElementById('lbar').className='lbar on';}
 function doneLoad(){const b=document.getElementById('lbar');b.className='lbar done';setTimeout(()=>b.className='lbar',400);}
 async function api(url, opts={}) {
   startLoad();
-  const r = await fetch(url, {headers:{'Content-Type':'application/json'}, ...opts});
+  const r = await fetch(url, {credentials:'same-origin', headers:{'Content-Type':'application/json'}, ...opts});
   doneLoad();
   if (!r.ok) { const e=await r.json().catch(()=>({error:'Error'})); toast('❌ '+e.error); throw new Error(e.error); }
   return r.json();

@@ -16,6 +16,10 @@ DB_PATH  = os.path.join(BASE_DIR, 'budget.db')
 app = Flask(__name__)
 app.secret_key = 'budgetcraft-local-secret-key-2025'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = False   # local http — no HTTPS needed
+app.config['SESSION_COOKIE_PATH'] = '/'       # valid for all paths
+app.config['SESSION_COOKIE_NAME'] = 'finhub_session'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
 ADMIN_USERNAME = 'admin'
@@ -131,6 +135,49 @@ def init_db():
             amount      REAL NOT NULL DEFAULT 0,
             sort_order  INTEGER NOT NULL DEFAULT 0,
             created_at  TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS ab_baskets (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            strategy     TEXT NOT NULL DEFAULT '',
+            rebalance    TEXT NOT NULL DEFAULT 'monthly',
+            capital      REAL NOT NULL DEFAULT 0,
+            nav          REAL NOT NULL DEFAULT 100.0,
+            inception    TEXT NOT NULL DEFAULT (date('now')),
+            status       TEXT NOT NULL DEFAULT 'active',
+            notes        TEXT NOT NULL DEFAULT '',
+            created_at   TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS ab_instruments (
+            id           TEXT PRIMARY KEY,
+            basket_id    TEXT NOT NULL,
+            tradingsymbol TEXT NOT NULL,
+            exchange     TEXT NOT NULL DEFAULT 'NSE',
+            target_pct   REAL NOT NULL DEFAULT 0,
+            qty          INTEGER NOT NULL DEFAULT 0,
+            avg_price    REAL NOT NULL DEFAULT 0,
+            sort_order   INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS ab_nav_history (
+            id           TEXT PRIMARY KEY,
+            basket_id    TEXT NOT NULL,
+            nav_date     TEXT NOT NULL,
+            nav          REAL NOT NULL,
+            total_value  REAL NOT NULL DEFAULT 0,
+            created_at   TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS ab_orders (
+            id           TEXT PRIMARY KEY,
+            basket_id    TEXT NOT NULL,
+            order_id     TEXT,
+            tradingsymbol TEXT NOT NULL,
+            exchange     TEXT NOT NULL DEFAULT 'NSE',
+            transaction_type TEXT NOT NULL,
+            qty          INTEGER NOT NULL DEFAULT 0,
+            price        REAL NOT NULL DEFAULT 0,
+            status       TEXT NOT NULL DEFAULT 'pending',
+            reason       TEXT NOT NULL DEFAULT '',
+            created_at   TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS networth_plan (
             id              TEXT PRIMARY KEY,
@@ -676,6 +723,11 @@ def strategies():
 def networth():
     return render_template('networth.html')
 
+@app.route('/autobasket')
+@login_required
+def autobasket():
+    return render_template('autobasket.html')
+
 def init_kite_db():
     conn = sqlite3.connect(DB_PATH)
     conn.executescript("""
@@ -691,6 +743,49 @@ def init_kite_db():
             amount      REAL NOT NULL DEFAULT 0,
             sort_order  INTEGER NOT NULL DEFAULT 0,
             created_at  TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS ab_baskets (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            strategy     TEXT NOT NULL DEFAULT '',
+            rebalance    TEXT NOT NULL DEFAULT 'monthly',
+            capital      REAL NOT NULL DEFAULT 0,
+            nav          REAL NOT NULL DEFAULT 100.0,
+            inception    TEXT NOT NULL DEFAULT (date('now')),
+            status       TEXT NOT NULL DEFAULT 'active',
+            notes        TEXT NOT NULL DEFAULT '',
+            created_at   TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS ab_instruments (
+            id           TEXT PRIMARY KEY,
+            basket_id    TEXT NOT NULL,
+            tradingsymbol TEXT NOT NULL,
+            exchange     TEXT NOT NULL DEFAULT 'NSE',
+            target_pct   REAL NOT NULL DEFAULT 0,
+            qty          INTEGER NOT NULL DEFAULT 0,
+            avg_price    REAL NOT NULL DEFAULT 0,
+            sort_order   INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS ab_nav_history (
+            id           TEXT PRIMARY KEY,
+            basket_id    TEXT NOT NULL,
+            nav_date     TEXT NOT NULL,
+            nav          REAL NOT NULL,
+            total_value  REAL NOT NULL DEFAULT 0,
+            created_at   TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS ab_orders (
+            id           TEXT PRIMARY KEY,
+            basket_id    TEXT NOT NULL,
+            order_id     TEXT,
+            tradingsymbol TEXT NOT NULL,
+            exchange     TEXT NOT NULL DEFAULT 'NSE',
+            transaction_type TEXT NOT NULL,
+            qty          INTEGER NOT NULL DEFAULT 0,
+            price        REAL NOT NULL DEFAULT 0,
+            status       TEXT NOT NULL DEFAULT 'pending',
+            reason       TEXT NOT NULL DEFAULT '',
+            created_at   TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS networth_plan (
             id              TEXT PRIMARY KEY,
@@ -940,13 +1035,56 @@ def kite_holdings():
     if not snap:
         return jsonify({'holdings': [], 'mf': [], 'fetched_at': None,
                         'total_value': 0, 'total_pnl': 0})
+
+    raw_holdings = _json.loads(snap['holdings_json'])
+    raw_mf       = _json.loads(snap['mf_json'])
+
+    # Re-augment equity holdings — ensure computed fields exist even on old snapshots
+    holdings_out = []
+    for h in raw_holdings:
+        h = dict(h)
+        free_qty    = int(h.get('free_quantity',    h.get('quantity', 0)))
+        pledged_qty = int(h.get('pledged_quantity', h.get('collateral_quantity', 0)))
+        t1_qty      = int(h.get('t1_quantity',      0))
+        total_qty   = int(h.get('total_quantity',   free_qty + pledged_qty + t1_qty))
+        ltp = float(h.get('last_price', 0))
+        avg = float(h.get('average_price', 0))
+        h['free_quantity']    = free_qty
+        h['pledged_quantity'] = pledged_qty
+        h['t1_quantity']      = t1_qty
+        h['total_quantity']   = total_qty
+        h['is_pledged']       = pledged_qty > 0
+        h['current_value']    = ltp * total_qty
+        h['invested_value']   = avg * total_qty
+        h['total_pnl']        = (ltp - avg) * total_qty
+        h['pnl_pct']          = ((ltp - avg) / avg * 100) if avg else 0
+        holdings_out.append(h)
+
+    # Re-augment MF holdings — ensure computed fields exist on old snapshots
+    mf_out = []
+    for m in raw_mf:
+        m = dict(m)
+        qty     = float(m.get('total_quantity', m.get('quantity', 0)))
+        nav     = float(m.get('last_price', 0))
+        avg_nav = float(m.get('average_price', 0))
+        m['total_quantity']  = qty
+        m['current_value']   = float(m.get('current_value',  nav * qty))
+        m['invested_value']  = float(m.get('invested_value', avg_nav * qty))
+        m['total_pnl']       = float(m.get('total_pnl',      (nav - avg_nav) * qty))
+        m['pnl_pct']         = float(m.get('pnl_pct',        ((nav - avg_nav) / avg_nav * 100) if avg_nav else 0))
+        mf_out.append(m)
+
+    # Recompute totals from augmented data
+    total_value = sum(h['current_value'] for h in holdings_out) + sum(m['current_value'] for m in mf_out)
+    total_pnl   = sum(h['total_pnl']     for h in holdings_out) + sum(m['total_pnl']     for m in mf_out)
+
     return jsonify({
-        'holdings':      _json.loads(snap['holdings_json']),
-        'mf':            _json.loads(snap['mf_json']),
+        'holdings':      holdings_out,
+        'mf':            mf_out,
         'fetched_at':    snap['created_at'],
         'snapshot_date': snap['snapshot_date'],
-        'total_value':   snap['total_value'],
-        'total_pnl':     snap['total_pnl'],
+        'total_value':   total_value,
+        'total_pnl':     total_pnl,
     })
 
 @app.route('/api/kite/snapshots')
@@ -1038,3 +1176,267 @@ if __name__ == '__main__':
     print("🚀 BudgetCraft running at http://127.0.0.1:5000")
     print("🔑 Login: admin / admindr")
     app.run(debug=True, host='127.0.0.1', port=5000)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AUTO BASKET MODULE API
+# ══════════════════════════════════════════════════════════════════════════════
+
+import json as _ab_json, uuid as _ab_uuid
+from datetime import datetime as _dt
+
+def ab_kite_price(symbols, access_token, api_key):
+    """Fetch LTP for a list of NSE symbols via Kite quotes API."""
+    if not symbols: return {}
+    qs = '&'.join(f'i=NSE:{s}' for s in symbols)
+    resp = kite_api(f'/quote/ltp?{qs}', access_token, api_key)
+    out = {}
+    if resp.get('status') == 'success':
+        for k, v in resp.get('data', {}).items():
+            sym = k.split(':')[-1]
+            out[sym] = float(v.get('last_price', 0))
+    return out
+
+@app.route('/api/ab/baskets', methods=['GET'])
+@login_required
+def ab_get_baskets():
+    baskets = q('SELECT * FROM ab_baskets ORDER BY created_at', fetchall=True)
+    for b in baskets:
+        instrs = q('SELECT * FROM ab_instruments WHERE basket_id=? ORDER BY sort_order',
+                   (b['id'],), fetchall=True)
+        b['instruments'] = instrs
+        # Latest NAV
+        nav_row = q('SELECT nav, total_value, nav_date FROM ab_nav_history WHERE basket_id=? ORDER BY nav_date DESC LIMIT 1',
+                    (b['id'],), fetchone=True)
+        if nav_row:
+            b['nav']          = nav_row['nav']
+            b['latest_value'] = nav_row['total_value']
+            b['nav_date']     = nav_row['nav_date']
+        b['return_pct'] = ((b['nav'] - 100.0) / 100.0 * 100) if b['nav'] else 0
+    return jsonify(baskets)
+
+@app.route('/api/ab/baskets', methods=['POST'])
+@login_required
+def ab_create_basket():
+    d = request.get_json()
+    bid = str(_ab_uuid.uuid4())
+    inception = d.get('inception') or _dt.now().strftime('%Y-%m-%d')
+    q('''INSERT INTO ab_baskets (id,name,strategy,rebalance,capital,nav,inception,status,notes)
+         VALUES (?,?,?,?,?,100.0,?,?,?)''',
+      (bid, d['name'], d.get('strategy',''), d.get('rebalance','monthly'),
+       float(d.get('capital',0)), inception, 'active', d.get('notes','')))
+    # Save instruments
+    for i, ins in enumerate(d.get('instruments', [])):
+        iid = str(_ab_uuid.uuid4())
+        q('''INSERT INTO ab_instruments (id,basket_id,tradingsymbol,exchange,target_pct,qty,avg_price,sort_order)
+             VALUES (?,?,?,?,?,?,?,?)''',
+          (iid, bid, ins['tradingsymbol'].upper(), ins.get('exchange','NSE'),
+           float(ins.get('target_pct',0)), int(ins.get('qty',0)),
+           float(ins.get('avg_price',0)), i))
+    # Seed initial NAV history
+    q('''INSERT INTO ab_nav_history (id,basket_id,nav_date,nav,total_value) VALUES (?,?,?,100.0,?)''',
+      (str(_ab_uuid.uuid4()), bid, inception, float(d.get('capital',0))))
+    return jsonify({'ok': True, 'id': bid})
+
+@app.route('/api/ab/baskets/<bid>', methods=['PUT'])
+@login_required
+def ab_update_basket(bid):
+    d = request.get_json()
+    q('''UPDATE ab_baskets SET name=?,strategy=?,rebalance=?,capital=?,status=?,notes=? WHERE id=?''',
+      (d['name'], d.get('strategy',''), d.get('rebalance','monthly'),
+       float(d.get('capital',0)), d.get('status','active'), d.get('notes',''), bid))
+    # Replace instruments
+    q('DELETE FROM ab_instruments WHERE basket_id=?', (bid,))
+    for i, ins in enumerate(d.get('instruments', [])):
+        iid = str(_ab_uuid.uuid4())
+        q('''INSERT INTO ab_instruments (id,basket_id,tradingsymbol,exchange,target_pct,qty,avg_price,sort_order)
+             VALUES (?,?,?,?,?,?,?,?)''',
+          (iid, bid, ins['tradingsymbol'].upper(), ins.get('exchange','NSE'),
+           float(ins.get('target_pct',0)), int(ins.get('qty',0)),
+           float(ins.get('avg_price',0)), i))
+    return jsonify({'ok': True})
+
+@app.route('/api/ab/baskets/<bid>', methods=['DELETE'])
+@login_required
+def ab_delete_basket(bid):
+    q('DELETE FROM ab_instruments WHERE basket_id=?', (bid,))
+    q('DELETE FROM ab_nav_history WHERE basket_id=?', (bid,))
+    q('DELETE FROM ab_orders WHERE basket_id=?', (bid,))
+    q('DELETE FROM ab_baskets WHERE id=?', (bid,))
+    return jsonify({'ok': True})
+
+@app.route('/api/ab/baskets/<bid>/nav', methods=['GET'])
+@login_required
+def ab_nav_history(bid):
+    rows = q('''SELECT nav_date, nav, total_value FROM ab_nav_history
+                WHERE basket_id=? GROUP BY nav_date ORDER BY nav_date''',
+             (bid,), fetchall=True)
+    return jsonify(rows)
+
+@app.route('/api/ab/baskets/<bid>/refresh', methods=['POST'])
+@login_required
+def ab_refresh_nav(bid):
+    """Fetch live prices, recompute NAV and record it."""
+    access_token = kite_cfg_get('access_token')
+    api_key      = kite_cfg_get('api_key')
+    basket = q('SELECT * FROM ab_baskets WHERE id=?', (bid,), fetchone=True)
+    if not basket:
+        return jsonify({'error': 'Basket not found'}), 404
+    instrs = q('SELECT * FROM ab_instruments WHERE basket_id=?', (bid,), fetchall=True)
+    if not instrs:
+        return jsonify({'error': 'No instruments'}), 400
+
+    symbols = [i['tradingsymbol'] for i in instrs]
+    prices = {}
+    if access_token and api_key:
+        prices = ab_kite_price(symbols, access_token, api_key)
+
+    total_value = 0.0
+    updated = []
+    for ins in instrs:
+        ltp = prices.get(ins['tradingsymbol'], ins.get('avg_price', 0))
+        val = ltp * int(ins['qty'])
+        total_value += val
+        updated.append({**ins, 'ltp': ltp, 'value': val,
+                        'pnl': (ltp - ins['avg_price']) * ins['qty'],
+                        'pnl_pct': ((ltp - ins['avg_price']) / ins['avg_price'] * 100) if ins['avg_price'] else 0})
+
+    # Compute NAV = 100 × (current_value / inception_capital)
+    capital = float(basket['capital']) or 1
+    nav = 100.0 * total_value / capital if total_value > 0 else basket['nav']
+
+    today = _dt.now().strftime('%Y-%m-%d')
+    # Upsert nav history for today
+    existing = q('SELECT id FROM ab_nav_history WHERE basket_id=? AND nav_date=?',
+                 (bid, today), fetchone=True)
+    if existing:
+        q('UPDATE ab_nav_history SET nav=?,total_value=? WHERE basket_id=? AND nav_date=?',
+          (round(nav,4), round(total_value,2), bid, today))
+    else:
+        q('INSERT INTO ab_nav_history (id,basket_id,nav_date,nav,total_value) VALUES (?,?,?,?,?)',
+          (str(_ab_uuid.uuid4()), bid, today, round(nav,4), round(total_value,2)))
+
+    q('UPDATE ab_baskets SET nav=? WHERE id=?', (round(nav,4), bid))
+
+    return jsonify({'ok': True, 'nav': round(nav,4), 'total_value': round(total_value,2),
+                    'instruments': updated, 'prices': prices})
+
+@app.route('/api/ab/baskets/<bid>/rebalance', methods=['POST'])
+@login_required
+def ab_rebalance(bid):
+    """Calculate rebalance orders. place=true to actually place via Kite."""
+    import math
+    access_token = kite_cfg_get('access_token')
+    api_key      = kite_cfg_get('api_key')
+    d = request.get_json() or {}
+    place = d.get('place', False)
+
+    basket = q('SELECT * FROM ab_baskets WHERE id=?', (bid,), fetchone=True)
+    if not basket: return jsonify({'error': 'Basket not found'}), 404
+    instrs = q('SELECT * FROM ab_instruments WHERE basket_id=?', (bid,), fetchall=True)
+    if not instrs: return jsonify({'error': 'No instruments'}), 400
+
+    symbols = [i['tradingsymbol'] for i in instrs]
+    prices = {}
+    if access_token and api_key:
+        prices = ab_kite_price(symbols, access_token, api_key)
+
+    capital = float(basket['capital'])
+    orders = []
+    for ins in instrs:
+        ltp = prices.get(ins['tradingsymbol'], ins.get('avg_price', 0))
+        if ltp <= 0: continue
+        target_val = capital * float(ins['target_pct']) / 100.0
+        target_qty = int(target_val / ltp)
+        current_qty = int(ins['qty'])
+        diff = target_qty - current_qty
+        if diff == 0: continue
+        txn = 'BUY' if diff > 0 else 'SELL'
+        order = {'tradingsymbol': ins['tradingsymbol'], 'exchange': ins['exchange'],
+                 'transaction_type': txn, 'qty': abs(diff),
+                 'price': round(ltp, 2), 'target_qty': target_qty,
+                 'current_qty': current_qty, 'value': round(abs(diff) * ltp, 2)}
+        orders.append(order)
+
+        if place and access_token and api_key:
+            # Place market order via Kite
+            order_data = _ab_json.dumps({
+                'tradingsymbol': ins['tradingsymbol'], 'exchange': ins['exchange'],
+                'transaction_type': txn, 'order_type': 'MARKET',
+                'product': 'CNC', 'quantity': abs(diff), 'validity': 'DAY'
+            }).encode()
+            import urllib.request as _ur
+            req = _ur.Request('https://api.kite.trade/orders/regular', data=order_data, method='POST')
+            req.add_header('X-Kite-Version', '3')
+            req.add_header('Authorization', f'token {api_key}:{access_token}')
+            req.add_header('Content-Type', 'application/json')
+            try:
+                with _ur.urlopen(req, timeout=15) as resp:
+                    result = _ab_json.loads(resp.read().decode())
+                kite_order_id = result.get('data', {}).get('order_id', '')
+                status = 'placed'
+            except Exception as ex:
+                kite_order_id = ''
+                status = f'failed: {ex}'
+            # Record order
+            q('''INSERT INTO ab_orders (id,basket_id,order_id,tradingsymbol,exchange,transaction_type,qty,price,status,reason)
+                 VALUES (?,?,?,?,?,?,?,?,?,?)''',
+              (str(_ab_uuid.uuid4()), bid, kite_order_id, ins['tradingsymbol'],
+               ins['exchange'], txn, abs(diff), round(ltp,2), status, 'rebalance'))
+
+    return jsonify({'ok': True, 'orders': orders, 'placed': place})
+
+@app.route('/api/ab/baskets/<bid>/orders', methods=['GET'])
+@login_required
+def ab_get_orders(bid):
+    rows = q('SELECT * FROM ab_orders WHERE basket_id=? ORDER BY created_at DESC',
+             (bid,), fetchall=True)
+    return jsonify(rows)
+
+@app.route('/api/ab/summary', methods=['GET'])
+@login_required
+def ab_summary():
+    baskets = q("SELECT * FROM ab_baskets WHERE status='active'", fetchall=True)
+    total_capital = sum(float(b['capital']) for b in baskets)
+    total_nav_val = sum(float(b.get('nav',100)) * float(b['capital']) / 100 for b in baskets)
+    total_pnl = total_nav_val - total_capital
+    return jsonify({
+        'basket_count': len(baskets),
+        'total_capital': total_capital,
+        'total_value': total_nav_val,
+        'total_pnl': total_pnl,
+    })
+
+@app.route('/api/ab/holdings_perf', methods=['GET'])
+@login_required
+def ab_holdings_perf():
+    """Top/bottom performers across all baskets by fetching live prices."""
+    access_token = kite_cfg_get('access_token')
+    api_key      = kite_cfg_get('api_key')
+    baskets = q("SELECT * FROM ab_baskets WHERE status='active'", fetchall=True)
+    all_instrs = []
+    basket_map = {b['id']: b['name'] for b in baskets}
+    for b in baskets:
+        rows = q('SELECT * FROM ab_instruments WHERE basket_id=?', (b['id'],), fetchall=True)
+        for r in rows:
+            r['basket_name'] = b['name']
+            all_instrs.append(r)
+
+    symbols = list(set(i['tradingsymbol'] for i in all_instrs))
+    prices = {}
+    if access_token and api_key and symbols:
+        prices = ab_kite_price(symbols, access_token, api_key)
+
+    perf = []
+    for ins in all_instrs:
+        ltp = prices.get(ins['tradingsymbol'], 0)
+        avg = float(ins.get('avg_price', 0))
+        pnl_pct = ((ltp - avg) / avg * 100) if avg else 0
+        day_chg = 0  # would need prev close for accurate day change
+        perf.append({'tradingsymbol': ins['tradingsymbol'],
+                     'basket_name': ins['basket_name'],
+                     'ltp': ltp, 'avg': avg,
+                     'pnl_pct': round(pnl_pct, 2),
+                     'qty': ins['qty']})
+
+    perf.sort(key=lambda x: x['pnl_pct'], reverse=True)
+    return jsonify({'instruments': perf})

@@ -552,9 +552,20 @@ function doneLoad(){const b=document.getElementById('loadingBar');b.className='l
 
 async function api(url,opts={}){
   startLoad();
-  const r=await fetch(url,{headers:{'Content-Type':'application/json'},...opts});
+  const r=await fetch(url,{credentials:'same-origin',headers:{'Content-Type':'application/json'},...opts});
   doneLoad();
-  if(!r.ok){const e=await r.json().catch(()=>({error:'Error'}));toast('❌ '+e.error);throw new Error(e.error);}
+  if(!r.ok){
+    const txt=await r.text();
+    if(txt.trimStart().startsWith('<')){
+      toast('❌ Session expired — please log in again');
+      setTimeout(()=>window.location='/login',1500);
+      throw new Error('Session expired');
+    }
+    let e={error:'Server error '+r.status};
+    try{e=JSON.parse(txt);}catch(_){}
+    toast('❌ '+(e.error||'Error '+r.status));
+    throw new Error(e.error||'Error');
+  }
   return r.json();
 }
 
